@@ -1,0 +1,14 @@
+{
+  "name": "watch-pressure-delivery-api",
+  "version": "2.0.0",
+  "private": true,
+  "description": "机械钟表擒纵调校 + 表壳防水压检与交付准入 API（入口/判定规则/档案存储三模块）",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test/"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

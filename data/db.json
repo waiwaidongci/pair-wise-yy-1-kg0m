@@ -32,5 +32,46 @@
       "qualified": false,
       "note": "仍偏快，振幅尚可"
     }
-  ]
+  ],
+  "pressureOrders": [
+    {
+      "id": "ptorder_demo",
+      "clockId": "clock_demo",
+      "caseBatch": "CASE-316L-042",
+      "sealBatch": "SEAL-FKM-088",
+      "status": "open",
+      "note": "表示例压检单，末压下降超标，等待换人复检",
+      "changes": [],
+      "createdAt": "2026-09-18T02:00:00.000Z",
+      "closedAt": null
+    }
+  ],
+  "pressureTests": [
+    {
+      "id": "ptest_demo",
+      "orderId": "ptorder_demo",
+      "clockId": "clock_demo",
+      "sequence": 1,
+      "targetDepthMeters": 120,
+      "holdMinutes": 30,
+      "startPressureBar": 5,
+      "endPressureBar": 4.6,
+      "pressureDropBar": 0.4,
+      "leakRateBarPerMin": 0.02,
+      "inspector": "王师傅",
+      "testedAt": "2026-09-18T02:30:00.000Z",
+      "result": "fail",
+      "qualified": false,
+      "failReasons": [
+        "末压下降 0.40 巴，超过 0.30 巴"
+      ],
+      "caseBatch": "CASE-316L-042",
+      "sealBatch": "SEAL-FKM-088",
+      "note": "首次压检",
+      "corrections": [],
+      "createdAt": "2026-09-18T02:30:00.000Z",
+      "correctedAt": null
+    }
+  ],
+  "admissions": []
 }

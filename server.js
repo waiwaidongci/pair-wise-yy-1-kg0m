@@ -1,48 +1,16 @@
+"use strict";
+
+// 服务装配层：HTTP 入口 → 路由分发 → 业务处理器（判定规则 / 档案存储均在 src 下）。
 const http = require("http");
-const { readFile, writeFile, mkdir } = require("fs/promises");
-const path = require("path");
+const store = require("./src/archive/store");
+const { send, parseBody } = require("./src/entry/http");
+const tuningHandlers = require("./src/entry/tuning");
+const pressureHandlers = require("./src/entry/pressure");
 
 const PORT = Number(process.env.PORT || 3021);
-const DB_FILE = path.join(__dirname, "data", "db.json");
-
-const initialData = {
-  clocks: [
-    {
-      id: "clock_demo",
-      code: "CLK-1890-07",
-      escapementType: "瑞士杠杆式",
-      balanceFrequency: "18000vph",
-      targetDailyRateSeconds: 20,
-      note: "怀表机芯，走时偏快",
-      createdAt: new Date().toISOString()
-    }
-  ],
-  adjustments: [
-    {
-      id: "adjustment_demo",
-      clockId: "clock_demo",
-      currentDailyRateSeconds: 68,
-      direction: "慢针方向",
-      amount: "游丝快慢针向慢侧微调0.4格",
-      note: "初次调校，先保守处理",
-      createdAt: new Date().toISOString()
-    }
-  ],
-  retests: [
-    {
-      id: "retest_demo",
-      clockId: "clock_demo",
-      adjustmentId: "adjustment_demo",
-      testedAt: new Date().toISOString(),
-      dailyRateSeconds: 31,
-      amplitude: 248,
-      qualified: false,
-      note: "仍偏快，振幅尚可"
-    }
-  ]
-};
 
 const routes = [
+  // 原走时调校
   "GET /health",
   "GET /clocks",
   "POST /clocks",
@@ -52,212 +20,122 @@ const routes = [
   "POST /clocks/:id/retests",
   "GET /clocks/:id/latest-retest",
   "GET /adjustments",
-  "GET /retests"
+  "GET /retests",
+  // 表壳防水压检与交付准入
+  "POST /clocks/:id/pressure-orders",
+  "GET /clocks/:id/pressure-orders",
+  "GET /clocks/:id/delivery",
+  "GET /pressure-orders",
+  "GET /pressure-orders/:orderId",
+  "PATCH /pressure-orders/:orderId",
+  "POST /pressure-orders/:orderId/close",
+  "POST /pressure-orders/:orderId/tests",
+  "PATCH /pressure-orders/:orderId/tests/:testId",
+  "GET /pressure-tests"
 ];
 
-async function ensureDb() {
-  await mkdir(path.dirname(DB_FILE), { recursive: true });
-  try {
-    JSON.parse(await readFile(DB_FILE, "utf8"));
-  } catch {
-    await writeFile(DB_FILE, JSON.stringify(initialData, null, 2));
+// 简单参数化路由：静态段优先于 :参数 段
+function matchRoute(method, pathname) {
+  for (const definition of routes) {
+    const [defMethod, defPath] = definition.split(" ");
+    if (defMethod !== method) continue;
+    const defSegs = defPath.split("/").filter(Boolean);
+    const reqSegs = pathname.split("/").filter(Boolean);
+    if (defSegs.length !== reqSegs.length) continue;
+    const params = {};
+    let ok = true;
+    for (let i = 0; i < defSegs.length; i += 1) {
+      if (defSegs[i].startsWith(":")) {
+        params[defSegs[i].slice(1)] = decodeURIComponent(reqSegs[i]);
+      } else if (defSegs[i] !== reqSegs[i]) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) return { definition, params };
   }
+  return null;
 }
 
-async function readDb() {
-  await ensureDb();
-  return JSON.parse(await readFile(DB_FILE, "utf8"));
-}
+// 路由 → 处理器（处理器只返回 { status, body }，不接触 res）
+async function dispatch(definition, params, query, body) {
+  switch (definition) {
+    case "GET /clocks":
+      return tuningHandlers.listClocks(query);
+    case "POST /clocks":
+      return tuningHandlers.createClock(body);
+    case "GET /clocks/not-qualified":
+      return tuningHandlers.notQualifiedClocks();
+    case "GET /clocks/:id/history":
+      return tuningHandlers.clockHistory({ clockId: params.id });
+    case "POST /clocks/:id/adjustments":
+      return tuningHandlers.addAdjustment({ clockId: params.id }, body);
+    case "POST /clocks/:id/retests":
+      return tuningHandlers.addRetest({ clockId: params.id }, body);
+    case "GET /clocks/:id/latest-retest":
+      return tuningHandlers.latestRetest({ clockId: params.id });
+    case "GET /adjustments":
+      return tuningHandlers.listAdjustments(query);
+    case "GET /retests":
+      return tuningHandlers.listRetests(query);
 
-async function writeDb(data) {
-  await writeFile(DB_FILE, JSON.stringify(data, null, 2));
-}
-
-function send(res, status, body) {
-  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
-  res.end(JSON.stringify(body, null, 2));
-}
-
-async function parseBody(req) {
-  let raw = "";
-  for await (const chunk of req) raw += chunk;
-  if (!raw) return {};
-  try {
-    return JSON.parse(raw);
-  } catch {
-    const error = new Error("请求体必须是合法JSON");
-    error.status = 400;
-    throw error;
+    case "POST /clocks/:id/pressure-orders":
+      return pressureHandlers.createOrder({ clockId: params.id }, body);
+    case "GET /clocks/:id/pressure-orders":
+      return pressureHandlers.listOrdersForClock({ clockId: params.id });
+    case "GET /clocks/:id/delivery":
+      return pressureHandlers.delivery({ clockId: params.id });
+    case "GET /pressure-orders":
+      return pressureHandlers.listOrders(query);
+    case "GET /pressure-orders/:orderId":
+      return pressureHandlers.getOrder({ orderId: params.orderId });
+    case "PATCH /pressure-orders/:orderId":
+      return pressureHandlers.patchOrder({ orderId: params.orderId }, body);
+    case "POST /pressure-orders/:orderId/close":
+      return pressureHandlers.closeOrder({ orderId: params.orderId }, body);
+    case "POST /pressure-orders/:orderId/tests":
+      return pressureHandlers.addTest({ orderId: params.orderId }, body);
+    case "PATCH /pressure-orders/:orderId/tests/:testId":
+      return pressureHandlers.patchTest(
+        { orderId: params.orderId, testId: params.testId },
+        body
+      );
+    case "GET /pressure-tests":
+      return pressureHandlers.listTests(query);
+    default:
+      return null;
   }
-}
-
-function makeId(prefix) {
-  return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function required(body, fields) {
-  const missing = fields.filter((field) => body[field] === undefined || body[field] === "");
-  if (missing.length) {
-    const error = new Error(`缺少字段：${missing.join(", ")}`);
-    error.status = 400;
-    throw error;
-  }
-}
-
-function findClock(db, clockId) {
-  const clock = db.clocks.find((item) => item.id === clockId);
-  if (!clock) {
-    const error = new Error("钟表不存在");
-    error.status = 404;
-    throw error;
-  }
-  return clock;
-}
-
-function latestRetest(db, clockId) {
-  return db.retests
-    .filter((item) => item.clockId === clockId)
-    .sort((a, b) => new Date(b.testedAt) - new Date(a.testedAt))[0] || null;
-}
-
-function latestAdjustment(db, clockId) {
-  return db.adjustments
-    .filter((item) => item.clockId === clockId)
-    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))[0] || null;
-}
-
-function clockSummary(db, clock) {
-  const retest = latestRetest(db, clock.id);
-  const adjustment = latestAdjustment(db, clock.id);
-  return {
-    ...clock,
-    latestAdjustment: adjustment,
-    latestRetest: retest,
-    qualified: retest ? retest.qualified : false
-  };
 }
 
 async function handle(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
-  const pathname = url.pathname;
-  const db = await readDb();
 
-  if (req.method === "GET" && pathname === "/health") {
-    return send(res, 200, { ok: true, service: "clock-escapement-tuning-api", routes });
+  if (req.method === "GET" && url.pathname === "/health") {
+    return send(res, 200, { ok: true, service: "watch-pressure-delivery-api", routes });
   }
 
-  if (req.method === "GET" && pathname === "/clocks") {
-    const qualified = url.searchParams.get("qualified");
-    let data = db.clocks.map((clock) => clockSummary(db, clock));
-    if (qualified !== null) {
-      const expected = qualified === "true";
-      data = data.filter((clock) => clock.qualified === expected);
-    }
-    return send(res, 200, { data });
-  }
+  const matched = matchRoute(req.method, url.pathname);
+  if (!matched) return send(res, 404, { error: "接口不存在", routes });
 
-  if (req.method === "POST" && pathname === "/clocks") {
-    const body = await parseBody(req);
-    required(body, ["code", "escapementType", "balanceFrequency"]);
-    const clock = {
-      id: makeId("clock"),
-      code: body.code,
-      escapementType: body.escapementType,
-      balanceFrequency: body.balanceFrequency,
-      targetDailyRateSeconds: Number(body.targetDailyRateSeconds ?? 30),
-      note: body.note || "",
-      createdAt: new Date().toISOString()
-    };
-    db.clocks.push(clock);
-    await writeDb(db);
-    return send(res, 201, { data: clockSummary(db, clock) });
-  }
-
-  if (req.method === "GET" && pathname === "/clocks/not-qualified") {
-    const data = db.clocks.map((clock) => clockSummary(db, clock)).filter((clock) => !clock.qualified);
-    return send(res, 200, { data });
-  }
-
-  const historyMatch = pathname.match(/^\/clocks\/([^/]+)\/history$/);
-  if (historyMatch && req.method === "GET") {
-    const clock = findClock(db, historyMatch[1]);
-    const adjustments = db.adjustments.filter((item) => item.clockId === clock.id);
-    const retests = db.retests.filter((item) => item.clockId === clock.id);
-    return send(res, 200, { data: { clock, adjustments, retests, latestRetest: latestRetest(db, clock.id) } });
-  }
-
-  const adjustmentMatch = pathname.match(/^\/clocks\/([^/]+)\/adjustments$/);
-  if (adjustmentMatch && req.method === "POST") {
-    const clock = findClock(db, adjustmentMatch[1]);
-    const body = await parseBody(req);
-    required(body, ["currentDailyRateSeconds", "direction", "amount"]);
-    const adjustment = {
-      id: makeId("adjustment"),
-      clockId: clock.id,
-      currentDailyRateSeconds: Number(body.currentDailyRateSeconds),
-      direction: body.direction,
-      amount: body.amount,
-      note: body.note || "",
-      createdAt: new Date().toISOString()
-    };
-    db.adjustments.push(adjustment);
-    await writeDb(db);
-    return send(res, 201, { data: adjustment });
-  }
-
-  const retestMatch = pathname.match(/^\/clocks\/([^/]+)\/retests$/);
-  if (retestMatch && req.method === "POST") {
-    const clock = findClock(db, retestMatch[1]);
-    const body = await parseBody(req);
-    required(body, ["dailyRateSeconds", "amplitude"]);
-    const adjustmentId = body.adjustmentId || latestAdjustment(db, clock.id)?.id || null;
-    const qualified = body.qualified !== undefined
-      ? Boolean(body.qualified)
-      : Math.abs(Number(body.dailyRateSeconds)) <= Number(clock.targetDailyRateSeconds);
-    const retest = {
-      id: makeId("retest"),
-      clockId: clock.id,
-      adjustmentId,
-      testedAt: body.testedAt || new Date().toISOString(),
-      dailyRateSeconds: Number(body.dailyRateSeconds),
-      amplitude: Number(body.amplitude),
-      qualified,
-      note: body.note || ""
-    };
-    db.retests.push(retest);
-    await writeDb(db);
-    return send(res, 201, { data: retest, clock: clockSummary(db, clock) });
-  }
-
-  const latestMatch = pathname.match(/^\/clocks\/([^/]+)\/latest-retest$/);
-  if (latestMatch && req.method === "GET") {
-    findClock(db, latestMatch[1]);
-    return send(res, 200, { data: latestRetest(db, latestMatch[1]) });
-  }
-
-  if (req.method === "GET" && pathname === "/adjustments") {
-    const clockId = url.searchParams.get("clockId");
-    return send(res, 200, { data: db.adjustments.filter((item) => !clockId || item.clockId === clockId) });
-  }
-
-  if (req.method === "GET" && pathname === "/retests") {
-    const clockId = url.searchParams.get("clockId");
-    const qualified = url.searchParams.get("qualified");
-    const data = db.retests.filter((item) => {
-      const matchClock = !clockId || item.clockId === clockId;
-      const matchQualified = qualified === null || item.qualified === (qualified === "true");
-      return matchClock && matchQualified;
-    });
-    return send(res, 200, { data });
-  }
-
-  return send(res, 404, { error: "接口不存在", routes });
+  const body = ["POST", "PATCH", "PUT"].includes(req.method) ? await parseBody(req) : {};
+  const query = Object.fromEntries(url.searchParams);
+  const result = await dispatch(matched.definition, matched.params, query, body);
+  return send(res, result.status, result.body);
 }
 
 const server = http.createServer((req, res) => {
-  handle(req, res).catch((error) => send(res, error.status || 500, { error: error.message || "服务器错误" }));
+  handle(req, res).catch((error) =>
+    send(res, error.status || 500, {
+      error: error.message || "服务器错误",
+      ...(error.extras || {})
+    })
+  );
 });
 
-server.listen(PORT, () => {
-  console.log(`Clock escapement tuning API running at http://127.0.0.1:${PORT}`);
-});
+if (require.main === module) {
+  server.listen(PORT, () => {
+    console.log(`Watch waterproof pressure test & delivery API running at http://127.0.0.1:${PORT}`);
+  });
+}
+
+module.exports = { server, routes, matchRoute, dispatch, store };
